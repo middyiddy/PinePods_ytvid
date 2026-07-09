@@ -204,3 +204,6 @@ pubspec.lock
 # C/C++ build files
 **/android/app/.cxx/
 **/android/**/.cxx/
+
+# Rust API build artifacts
+rust-api/target/
