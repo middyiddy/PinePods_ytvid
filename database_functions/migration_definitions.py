@@ -5039,3 +5039,42 @@ def migration_050_create_skip_segments(conn, db_type: str):
         raise
     finally:
         cursor.close()
+
+
+@register_migration("051", "add_youtube_video_download_setting", "Add per-podcast DownloadYouTubeVideos toggle so YouTube subscriptions can be downloaded as video instead of audio-only", requires=["001"])
+def migration_051_add_youtube_video_download_setting(conn, db_type: str):
+    """Add Podcasts.DownloadYouTubeVideos (default FALSE).
+
+    When FALSE (the historical behavior) YouTube subscriptions download the audio track only,
+    extracted to MP3. When TRUE new downloads for the channel keep the video and are saved as
+    MP4, and the episodes are served/played as video podcasts."""
+    logger.info("Starting migration 051: Add DownloadYouTubeVideos column to Podcasts")
+    cursor = conn.cursor()
+
+    try:
+        if db_type == "postgresql":
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'Podcasts' AND column_name = 'downloadyoutubevideos'
+            """)
+            if not cursor.fetchone():
+                cursor.execute('ALTER TABLE "Podcasts" ADD COLUMN downloadyoutubevideos BOOLEAN DEFAULT FALSE')
+                logger.info("Added column downloadyoutubevideos to Podcasts (PostgreSQL)")
+        else:  # MySQL / MariaDB
+            cursor.execute(
+                """
+                SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Podcasts' AND COLUMN_NAME = 'DownloadYouTubeVideos'
+                """
+            )
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE Podcasts ADD COLUMN DownloadYouTubeVideos BOOLEAN DEFAULT FALSE")
+                logger.info("Added column DownloadYouTubeVideos to Podcasts (MySQL)")
+
+        logger.info("DownloadYouTubeVideos migration completed successfully")
+
+    except Exception as e:
+        logger.error(f"Error in DownloadYouTubeVideos migration: {e}")
+        raise
+    finally:
+        cursor.close()

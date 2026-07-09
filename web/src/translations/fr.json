@@ -377,6 +377,8 @@
     "youtube_download_limit": "Limite de téléchargement d'épisode YouTube (jours) :",
     "youtube_episode_limit_updated": "Limite d'épisodes YouTube mise à jour !",
     "youtube_limit_description": "Ajuster la durée de rétention du flux audio YouTube lors du téléchargement pour diffusion via le serveur. Les épisodes YouTube seront supprimés ensuite pour libérer de l'espace.",
+    "youtube_video_download": "Download as video",
+    "youtube_video_download_description": "Download new episodes from this channel as video (MP4) instead of audio-only",
     "video": "Video",
     "trim_silence": "Trim silence",
     "trim_silence_description": "Auto-detect and skip silence on new downloads",

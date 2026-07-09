@@ -1930,6 +1930,101 @@ pub async fn get_feed_cutoff_days(
     }
 }
 
+// Query parameters for get_youtube_video_download
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct YouTubeVideoDownloadQuery {
+    pub podcast_id: i32,
+    pub user_id: i32,
+}
+
+// Response for the per-channel YouTube video download setting
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct YouTubeVideoDownloadResponse {
+    pub podcast_id: i32,
+    pub user_id: i32,
+    pub download_video: bool,
+}
+
+// Get whether a YouTube channel downloads full videos (MP4) instead of audio-only (MP3)
+#[utoipa::path(
+    get,
+    path = "/get_youtube_video_download",
+    tag = "podcasts",
+    summary = "Get YouTube video download setting",
+    params(YouTubeVideoDownloadQuery),
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "Success", body = YouTubeVideoDownloadResponse),
+        (status = 401, description = "Invalid or missing API key"),
+    ),
+)]
+pub async fn get_youtube_video_download(
+    Query(query): Query<YouTubeVideoDownloadQuery>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<YouTubeVideoDownloadResponse>, AppError> {
+    let api_key = extract_api_key(&headers)?;
+    validate_api_key(&state, &api_key).await?;
+
+    let is_web_key = state.db_pool.is_web_key(&api_key).await?;
+    let key_id = state.db_pool.get_user_id_from_api_key(&api_key).await?;
+
+    if key_id != query.user_id && !is_web_key {
+        return Err(AppError::forbidden("You can only access settings of your own podcasts!"));
+    }
+
+    let download_video = state.db_pool.get_youtube_video_download(query.podcast_id).await?;
+    Ok(Json(YouTubeVideoDownloadResponse {
+        podcast_id: query.podcast_id,
+        user_id: query.user_id,
+        download_video,
+    }))
+}
+
+// Request struct for update_youtube_video_download
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct UpdateYouTubeVideoDownloadData {
+    pub podcast_id: i32,
+    pub user_id: i32,
+    pub download_video: bool,
+}
+
+// Update whether a YouTube channel downloads full videos (MP4) instead of audio-only (MP3)
+#[utoipa::path(
+    post,
+    path = "/update_youtube_video_download",
+    tag = "podcasts",
+    summary = "Update YouTube video download setting",
+    request_body = UpdateYouTubeVideoDownloadData,
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "Success", body = serde_json::Value),
+        (status = 401, description = "Invalid or missing API key"),
+    ),
+)]
+pub async fn update_youtube_video_download(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    Json(data): Json<UpdateYouTubeVideoDownloadData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let api_key = extract_api_key(&headers)?;
+    validate_api_key(&state, &api_key).await?;
+
+    let is_web_key = state.db_pool.is_web_key(&api_key).await?;
+    let key_id = state.db_pool.get_user_id_from_api_key(&api_key).await?;
+
+    if key_id != data.user_id && !is_web_key {
+        return Err(AppError::forbidden("You can only modify settings of your own podcasts!"));
+    }
+
+    let success = state.db_pool.update_youtube_video_download(data.podcast_id, data.user_id, data.download_video).await?;
+    if success {
+        Ok(Json(serde_json::json!({"detail": "YouTube video download setting updated successfully!"})))
+    } else {
+        Err(AppError::bad_request("Error updating YouTube video download setting"))
+    }
+}
+
 // Request for podcast notification status - matches Python PodcastNotificationStatusData
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct PodcastNotificationStatusRequest {

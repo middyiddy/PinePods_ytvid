@@ -321,6 +321,8 @@ fn create_data_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::podcasts::get_host_podcasts))
         .routes(routes!(handlers::podcasts::get_podpeople_discover))
         .routes(routes!(handlers::podcasts::update_feed_cutoff_days))
+        .routes(routes!(handlers::podcasts::get_youtube_video_download))
+        .routes(routes!(handlers::podcasts::update_youtube_video_download))
         .routes(routes!(handlers::podcasts::fetch_podcast_feed))
         .routes(routes!(handlers::podcasts::youtube_episodes))
         .routes(routes!(handlers::podcasts::remove_youtube_channel))

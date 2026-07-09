@@ -3826,6 +3826,103 @@ pub async fn call_get_feed_cutoff_days(
 
 #[derive(Serialize)]
 #[allow(dead_code)]
+pub struct UpdateYouTubeVideoDownloadRequest {
+    pub(crate) podcast_id: i32,
+    pub(crate) user_id: i32,
+    pub(crate) download_video: bool,
+}
+
+#[allow(dead_code)]
+pub async fn call_update_youtube_video_download(
+    server_name: &String,
+    api_key: &Option<String>,
+    request_data: &UpdateYouTubeVideoDownloadRequest,
+) -> Result<String, Error> {
+    let url = format!("{}/api/data/update_youtube_video_download", server_name);
+
+    let api_key_ref = api_key
+        .as_deref()
+        .ok_or_else(|| anyhow::Error::msg("API key is missing"))?;
+
+    let request_body = serde_json::to_string(request_data)
+        .map_err(|e| anyhow::Error::msg(format!("Serialization Error: {}", e)))?;
+
+    let response = Request::post(&url)
+        .header("Api-Key", api_key_ref)
+        .header("Content-Type", "application/json")
+        .body(request_body)?
+        .send()
+        .await?;
+
+    if response.ok() {
+        let success_message = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("YouTube video download setting updated successfully"));
+        Ok(success_message)
+    } else {
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("Failed to read error message"));
+        Err(anyhow::Error::msg(format!(
+            "Failed to update YouTube video download setting: {} - {}",
+            response.status_text(),
+            error_text
+        )))
+    }
+}
+
+#[allow(dead_code)]
+pub async fn call_get_youtube_video_download(
+    server_name: &String,
+    api_key: &Option<String>,
+    podcast_id: i32,
+    user_id: i32,
+) -> Result<bool, Error> {
+    let url = format!(
+        "{}/api/data/get_youtube_video_download?podcast_id={}&user_id={}",
+        server_name, podcast_id, user_id
+    );
+
+    let api_key_ref = api_key
+        .as_deref()
+        .ok_or_else(|| anyhow::Error::msg("API key is missing"))?;
+
+    let response = Request::get(&url)
+        .header("Api-Key", api_key_ref)
+        .send()
+        .await?;
+
+    if response.ok() {
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| anyhow::Error::msg(format!("Failed to read response: {}", e)))?;
+
+        let response_data: serde_json::Value = serde_json::from_str(&response_text)
+            .map_err(|e| anyhow::Error::msg(format!("Failed to parse JSON: {}", e)))?;
+
+        let download_video = response_data["download_video"]
+            .as_bool()
+            .ok_or_else(|| anyhow::Error::msg("download_video not found in response"))?;
+
+        Ok(download_video)
+    } else {
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("Failed to read error message"));
+        Err(anyhow::Error::msg(format!(
+            "Failed to get YouTube video download setting: {} - {}",
+            response.status_text(),
+            error_text
+        )))
+    }
+}
+
+#[derive(Serialize)]
+#[allow(dead_code)]
 pub struct RemoveCategoryRequest {
     pub(crate) podcast_id: i32,
     pub(crate) user_id: i32,

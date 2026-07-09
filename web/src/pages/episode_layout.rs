@@ -20,6 +20,8 @@ use crate::requests::pod_req::{
     call_fetch_podcasting_2_pod_data, call_get_auto_download_status,
     call_get_auto_play_next_status,
     call_get_feed_cutoff_days, call_get_merged_podcasts, call_get_play_episode_details,
+    call_get_youtube_video_download, call_update_youtube_video_download,
+    UpdateYouTubeVideoDownloadRequest,
     call_get_podcast_details, call_get_podcast_id_from_ep, call_get_podcast_id_from_ep_name,
     call_get_podcast_favorite_status, call_get_podcast_notifications_status, call_get_podcasts,
     call_get_rss_key, call_merge_podcasts, call_remove_category, call_remove_podcasts_name,
@@ -414,6 +416,12 @@ pub fn episode_layout() -> Html {
     let i18n_youtube_limit_description = i18n
         .t("episodes_layout.youtube_limit_description")
         .to_string();
+    let i18n_youtube_video_download = i18n
+        .t("episodes_layout.youtube_video_download")
+        .to_string();
+    let i18n_youtube_video_download_description = i18n
+        .t("episodes_layout.youtube_video_download_description")
+        .to_string();
     let i18n_adjust_podcast_categories = i18n
         .t("episodes_layout.adjust_podcast_categories")
         .to_string();
@@ -513,6 +521,7 @@ pub fn episode_layout() -> Html {
     let favorite_status = use_state(|| false);
     let feed_cutoff_days = use_state(|| 0);
     let feed_cutoff_days_input = use_state(|| "0".to_string());
+    let youtube_video_download = use_state(|| false);
     let playback_speed = use_state(|| 1.0);
     let playback_speed_customized = use_state(|| false);
     let use_podcast_covers = use_state(|| false);
@@ -2106,6 +2115,102 @@ pub fn episode_layout() -> Html {
         });
     }
 
+    // Load the per-channel YouTube video download setting when the podcast id becomes known.
+    {
+        let youtube_video_download = youtube_video_download.clone();
+        let api_key = api_key.clone();
+        let server_name = server_name.clone();
+        let user_id = user_id.clone();
+        let podcast_id = podcast_id.clone();
+        use_effect_with(*podcast_id, move |pid| {
+            let pid = *pid;
+            if pid != 0 {
+                if let (Some(api_key), Some(server_name), Some(user_id)) =
+                    (api_key.clone(), server_name.clone(), user_id.clone())
+                {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Ok(download_video) = call_get_youtube_video_download(
+                            &server_name,
+                            &api_key,
+                            pid,
+                            user_id,
+                        )
+                        .await
+                        {
+                            youtube_video_download.set(download_video);
+                        }
+                    });
+                }
+            }
+            || ()
+        });
+    }
+
+    // Toggle + save the YouTube video download setting
+    let youtube_video_download_checked = *youtube_video_download;
+    let youtube_video_download_toggle = {
+        let youtube_video_download = youtube_video_download.clone();
+        let api_key = api_key.clone();
+        let user_id = user_id.clone();
+        let server_name = server_name.clone();
+        let podcast_id = podcast_id.clone();
+
+        Callback::from(move |e: Event| {
+            let input = match e.target_dyn_into::<HtmlInputElement>() {
+                Some(input) => input,
+                None => return,
+            };
+            let enabled = input.checked();
+            youtube_video_download.set(enabled);
+
+            let youtube_video_download = youtube_video_download.clone();
+            let api_key = api_key.clone();
+            let user_id = user_id.clone().unwrap();
+            let server_name = server_name.clone();
+            let podcast_id = *podcast_id;
+
+            wasm_bindgen_futures::spawn_local(async move {
+                if let (Some(api_key), Some(server_name)) = (api_key.as_ref(), server_name.as_ref())
+                {
+                    let request = UpdateYouTubeVideoDownloadRequest {
+                        podcast_id,
+                        user_id,
+                        download_video: enabled,
+                    };
+                    match call_update_youtube_video_download(
+                        server_name,
+                        api_key,
+                        &request,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            Dispatch::<NotificationState>::global().reduce_mut(|state| {
+                                state.info_message = Option::from(if enabled {
+                                    "New episodes will download as video.".to_string()
+                                } else {
+                                    "New episodes will download as audio only.".to_string()
+                                })
+                            });
+                        }
+                        Err(e) => {
+                            web_sys::console::log_1(
+                                &format!("Error updating YouTube video download: {}", e).into(),
+                            );
+                            // Roll the checkbox back so the UI reflects the server state
+                            youtube_video_download.set(!enabled);
+                            Dispatch::<NotificationState>::global().reduce_mut(|state| {
+                                state.error_message = Option::from(
+                                    "Error updating YouTube video download setting.".to_string(),
+                                )
+                            });
+                        }
+                    }
+                }
+            });
+        })
+    };
+
     // Save the silence-trim settings to the server
     let save_silence_trim = {
         let trim_silence = trim_silence.clone();
@@ -2600,6 +2705,7 @@ pub fn episode_layout() -> Html {
                                 if let Some(info) = &podcast_info {
                                     if info.is_youtube.unwrap_or(false) {
                                         html! {
+                                            <>
                                             <div class="mt-4">
                                                 <label for="feed-cutoff" class="block mb-2 text-sm font-medium">{&i18n_youtube_download_limit}</label>
                                                 <div class="flex items-center space-x-2">
@@ -2621,6 +2727,20 @@ pub fn episode_layout() -> Html {
                                                 </div>
                                                 <p class="text-xs text-gray-500 mt-1">{&i18n_youtube_limit_description}</p>
                                             </div>
+                                            <div class="mt-4">
+                                                <label for="youtube-video-download" class="block mb-2 text-sm font-medium">{&i18n_youtube_video_download}</label>
+                                                <div class="flex items-center space-x-2">
+                                                    <input
+                                                        type="checkbox"
+                                                        id="youtube-video-download"
+                                                        class="w-4 h-4"
+                                                        checked={youtube_video_download_checked}
+                                                        onchange={youtube_video_download_toggle.clone()}
+                                                    />
+                                                    <span class="text-sm">{&i18n_youtube_video_download_description}</span>
+                                                </div>
+                                            </div>
+                                            </>
                                         }
                                     } else {
                                         html! {}  // Render nothing if it's not a YouTube podcast

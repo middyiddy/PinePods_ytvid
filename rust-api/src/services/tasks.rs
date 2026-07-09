@@ -604,41 +604,54 @@ impl TaskSpawner {
             move |task_id, task_manager, db_pool| async move {
                 tracing::info!("Downloading YouTube video {} for user {}", video_id, user_id);
                 
-                // Get the video from database using the video ID
-                let (youtube_video_id, video_title) = match &db_pool {
+                // Get the video from database using the video ID, along with the channel's
+                // download-as-video setting
+                let (youtube_video_id, video_title, download_video) = match &db_pool {
                     crate::database::DatabasePool::Postgres(pool) => {
-                        let row = sqlx::query(r#"SELECT youtubevideoid, videotitle FROM "YouTubeVideos" WHERE videoid = $1"#)
+                        let row = sqlx::query(r#"
+                            SELECT v.youtubevideoid, v.videotitle, COALESCE(p.downloadyoutubevideos, FALSE) AS download_video
+                            FROM "YouTubeVideos" v
+                            INNER JOIN "Podcasts" p ON v.podcastid = p.podcastid
+                            WHERE v.videoid = $1
+                        "#)
                             .bind(video_id)
                             .fetch_one(pool)
                             .await
                             .map_err(|e| crate::error::AppError::internal(&format!("Failed to get video: {}", e)))?;
-                        
+
                         let youtube_video_id: String = row.try_get("youtubevideoid")
                             .map_err(|e| crate::error::AppError::internal(&format!("Failed to get YouTube video ID: {}", e)))?;
                         let video_title: String = row.try_get("videotitle")
                             .map_err(|e| crate::error::AppError::internal(&format!("Failed to get video title: {}", e)))?;
-                        
-                        (youtube_video_id, video_title)
+                        let download_video: bool = row.try_get("download_video").unwrap_or(false);
+
+                        (youtube_video_id, video_title, download_video)
                     }
                     crate::database::DatabasePool::MySQL(pool) => {
-                        let row = sqlx::query("SELECT YouTubeVideoID, VideoTitle FROM YouTubeVideos WHERE VideoID = ?")
+                        let row = sqlx::query("
+                            SELECT v.YouTubeVideoID, v.VideoTitle, COALESCE(p.DownloadYouTubeVideos, 0) AS download_video
+                            FROM YouTubeVideos v
+                            INNER JOIN Podcasts p ON v.PodcastID = p.PodcastID
+                            WHERE v.VideoID = ?
+                        ")
                             .bind(video_id)
                             .fetch_one(pool)
                             .await
                             .map_err(|e| crate::error::AppError::internal(&format!("Failed to get video: {}", e)))?;
-                        
+
                         let youtube_video_id: String = row.try_get("YouTubeVideoID")
                             .map_err(|e| crate::error::AppError::internal(&format!("Failed to get YouTube video ID: {}", e)))?;
                         let video_title: String = row.try_get("VideoTitle")
                             .map_err(|e| crate::error::AppError::internal(&format!("Failed to get video title: {}", e)))?;
-                        
-                        (youtube_video_id, video_title)
+                        let download_video: bool = row.try_get::<i8, _>("download_video").map(|v| v != 0).unwrap_or(false);
+
+                        (youtube_video_id, video_title, download_video)
                     }
                 };
-                
+
                 task_manager.set_task_metadata(&task_id, Some(video_title.clone()), Some("YouTube".to_string())).await?;
 
-                let output_path = format!("/opt/pinepods/downloads/youtube/{}.mp3", youtube_video_id);
+                let output_path = crate::handlers::youtube::youtube_output_path(&youtube_video_id, download_video);
 
                 // Check if file already exists
                 if tokio::fs::metadata(&output_path).await.is_ok() {
@@ -649,23 +662,23 @@ impl TaskSpawner {
                         "path": output_path
                     }));
                 }
-                
+
                 // Download the video using the YouTube handler function
-                match crate::handlers::youtube::download_youtube_audio(&youtube_video_id, &output_path).await {
+                match crate::handlers::youtube::download_youtube_media(&youtube_video_id, &output_path, download_video).await {
                     Ok(_) => {
                         tracing::info!("Successfully downloaded YouTube video: {}", video_title);
-                        
-                        // Get duration from the downloaded MP3 file and update database
-                        if let Some(duration) = crate::handlers::youtube::get_mp3_duration(&output_path) {
+
+                        // Get duration from the downloaded file and update database
+                        if let Some(duration) = crate::handlers::youtube::get_downloaded_duration(&output_path).await {
                             if let Err(e) = db_pool.update_youtube_video_duration(&youtube_video_id, duration).await {
                                 tracing::error!("Failed to update duration for video {}: {}", youtube_video_id, e);
                             } else {
                                 tracing::info!("Updated duration for video {} to {} seconds", youtube_video_id, duration);
                             }
                         } else {
-                            tracing::warn!("Could not read duration from MP3 file: {}", output_path);
+                            tracing::warn!("Could not read duration from downloaded file: {}", output_path);
                         }
-                        
+
                         Ok(serde_json::json!({
                             "video_id": video_id,
                             "user_id": user_id,
@@ -875,37 +888,40 @@ impl TaskSpawner {
                 let mut downloaded = 0;
                 let mut already_downloaded = 0;
                 let mut failed = 0;
-                
+
+                // Whether this channel downloads full videos (MP4) instead of audio-only (MP3)
+                let download_video = db_pool.get_youtube_video_download(channel_id).await.unwrap_or(false);
+
                 for (index, (youtube_video_id, video_title)) in videos_data.iter().enumerate() {
-                    
-                    let output_path = format!("/opt/pinepods/downloads/youtube/{}.mp3", youtube_video_id);
-                    
+
+                    let output_path = crate::handlers::youtube::youtube_output_path(youtube_video_id, download_video);
+
                     // Update progress
                     let progress = (index as f64 / total_videos as f64) * 100.0;
                     task_manager.update_task_progress(&task_id, progress, Some(format!("Downloading: {}", video_title))).await?;
-                    
+
                     // Check if file already exists
                     if tokio::fs::metadata(&output_path).await.is_ok() {
                         tracing::info!("Video {} already downloaded", video_title);
                         already_downloaded += 1;
                         continue;
                     }
-                    
+
                     // Download the video
-                    match crate::handlers::youtube::download_youtube_audio(youtube_video_id, &output_path).await {
+                    match crate::handlers::youtube::download_youtube_media(youtube_video_id, &output_path, download_video).await {
                         Ok(_) => {
                             tracing::info!("Successfully downloaded: {}", video_title);
                             downloaded += 1;
-                            
-                            // Get duration from the downloaded MP3 file and update database
-                            if let Some(duration) = crate::handlers::youtube::get_mp3_duration(&output_path) {
+
+                            // Get duration from the downloaded file and update database
+                            if let Some(duration) = crate::handlers::youtube::get_downloaded_duration(&output_path).await {
                                 if let Err(e) = db_pool.update_youtube_video_duration(youtube_video_id, duration).await {
                                     tracing::error!("Failed to update duration for video {}: {}", youtube_video_id, e);
                                 } else {
                                     tracing::info!("Updated duration for video {} to {} seconds", youtube_video_id, duration);
                                 }
                             } else {
-                                tracing::warn!("Could not read duration from MP3 file: {}", output_path);
+                                tracing::warn!("Could not read duration from downloaded file: {}", output_path);
                             }
                         }
                         Err(e) => {

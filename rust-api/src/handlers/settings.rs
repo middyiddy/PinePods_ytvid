@@ -2499,6 +2499,8 @@ pub struct CustomPodcastRequest {
     pub password: Option<String>,
     pub youtube_channel: Option<bool>,
     pub feed_cutoff: Option<i32>,
+    // For YouTube channels: download episodes as video (MP4) instead of audio-only (MP3)
+    pub download_video: Option<bool>,
 }
 
 // Request struct for notification_settings
@@ -2616,6 +2618,7 @@ pub async fn add_custom_podcast(
             &channel_info,
             request.user_id,
             feed_cutoff,
+            request.download_video.unwrap_or(false),
         ).await?;
 
         // Spawn background task to process YouTube videos

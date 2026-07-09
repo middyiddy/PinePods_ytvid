@@ -491,6 +491,8 @@
     "youtube_episode_limit_updated": "Youtube Episode Limit Updated!",
     "video": "Video",
     "youtube_limit_description": "Adjusts how long Youtube Feed audio is retained when downloaded to be streamed via the server. Youtube episodes will be removed after to free up space.",
+    "youtube_video_download": "Download as video",
+    "youtube_video_download_description": "Download new episodes from this channel as video (MP4) instead of audio-only",
     "trim_silence": "Trim silence",
     "trim_silence_description": "Auto-detect and skip silence on new downloads",
     "aggressiveness": "Aggressiveness"

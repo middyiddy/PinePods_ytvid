@@ -9536,7 +9536,8 @@ impl DatabasePool {
                                 CASE WHEN q.episodeid IS NOT NULL THEN true ELSE false END as is_queued,
                                 CASE WHEN s.episodeid IS NOT NULL THEN true ELSE false END as is_saved,
                                 CASE WHEN d.episodeid IS NOT NULL THEN true ELSE false END as is_downloaded,
-                                TRUE::boolean as is_youtube
+                                TRUE::boolean as is_youtube,
+                                COALESCE("Podcasts".downloadyoutubevideos, FALSE) as is_video
                         FROM "YouTubeVideos"
                         INNER JOIN "Podcasts" ON "YouTubeVideos".podcastid = "Podcasts".podcastid
                         LEFT JOIN "EpisodeQueue" q ON "YouTubeVideos".videoid = q.episodeid AND q.userid = $1
@@ -9572,14 +9573,15 @@ impl DatabasePool {
                             "is_saved": row.try_get::<bool, _>("is_saved")?,
                             "is_downloaded": row.try_get::<bool, _>("is_downloaded")?,
                             "is_youtube": row.try_get::<bool, _>("is_youtube")?,
+                            "is_video": row.try_get::<bool, _>("is_video").unwrap_or(false),
                         }));
                     }
                 } else if person_episode {
                     // Query for person episodes - matches Python implementation
                     let row = sqlx::query(
-                        r#"SELECT 
-                            p.podcastid, 
-                            p.podcastindexid, 
+                        r#"SELECT
+                            p.podcastid,
+                            p.podcastindexid,
                             p.feedurl,
                             p.podcastname, 
                             p.artworkurl,
@@ -19291,7 +19293,7 @@ impl DatabasePool {
     }
     
     // Add YouTube channel - matches Python add_youtube_channel function exactly
-    pub async fn add_youtube_channel(&self, channel_info: &std::collections::HashMap<String, String>, user_id: i32, feed_cutoff: i32) -> AppResult<i32> {
+    pub async fn add_youtube_channel(&self, channel_info: &std::collections::HashMap<String, String>, user_id: i32, feed_cutoff: i32, download_video: bool) -> AppResult<i32> {
         debug!("Adding YouTube channel to database for user {}", user_id);
         
         let channel_id = channel_info.get("channel_id").ok_or_else(|| AppError::bad_request("Channel ID is required"))?;
@@ -19307,8 +19309,8 @@ impl DatabasePool {
                 let row = sqlx::query(r#"
                     INSERT INTO "Podcasts" (
                         userid, podcastname, artworkurl, description, episodecount,
-                        websiteurl, feedurl, author, categories, explicit, podcastindexid, feedcutoffdays, isyoutubechannel
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                        websiteurl, feedurl, author, categories, explicit, podcastindexid, feedcutoffdays, isyoutubechannel, downloadyoutubevideos
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     RETURNING podcastid
                 "#)
                     .bind(user_id)
@@ -19324,6 +19326,7 @@ impl DatabasePool {
                     .bind(0) // No podcast index ID for YouTube
                     .bind(feed_cutoff)
                     .bind(true) // Is YouTube channel
+                    .bind(download_video)
                     .fetch_one(pool)
                     .await?;
                 
@@ -19333,8 +19336,8 @@ impl DatabasePool {
                 let result = sqlx::query(r#"
                     INSERT INTO Podcasts (
                         UserID, PodcastName, ArtworkURL, Description, EpisodeCount,
-                        WebsiteURL, FeedURL, Author, Categories, Explicit, PodcastIndexID, FeedCutoffDays, IsYouTubeChannel
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        WebsiteURL, FeedURL, Author, Categories, Explicit, PodcastIndexID, FeedCutoffDays, IsYouTubeChannel, DownloadYouTubeVideos
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#)
                     .bind(user_id)
                     .bind(name)
@@ -19349,6 +19352,7 @@ impl DatabasePool {
                     .bind(0) // No podcast index ID for YouTube
                     .bind(feed_cutoff)
                     .bind(true) // Is YouTube channel
+                    .bind(download_video)
                     .execute(pool)
                     .await?;
                 
@@ -22878,21 +22882,22 @@ impl DatabasePool {
 
         debug!("Found YouTube ID: {}", youtube_id);
 
-        let file_path = format!("/opt/pinepods/downloads/youtube/{}.mp3", youtube_id);
-        let file_path_double = format!("/opt/pinepods/downloads/youtube/{}.mp3.mp3", youtube_id);
+        // Prefer a video download when present, then fall back to the audio-only variants
+        let candidate_paths = [
+            format!("/opt/pinepods/downloads/youtube/{}.mp4", youtube_id),
+            format!("/opt/pinepods/downloads/youtube/{}.mp3", youtube_id),
+            format!("/opt/pinepods/downloads/youtube/{}.mp3.mp3", youtube_id),
+        ];
 
-        debug!("Checking paths: {} and {}", file_path, file_path_double);
-
-        if tokio::fs::metadata(&file_path).await.is_ok() {
-            debug!("Found file at {}", file_path);
-            Ok(Some(file_path))
-        } else if tokio::fs::metadata(&file_path_double).await.is_ok() {
-            debug!("Found file at {}", file_path_double);
-            Ok(Some(file_path_double))
-        } else {
-            debug!("No file found for YouTube ID: {}", youtube_id);
-            Ok(None)
+        for file_path in candidate_paths {
+            if tokio::fs::metadata(&file_path).await.is_ok() {
+                debug!("Found file at {}", file_path);
+                return Ok(Some(file_path));
+            }
         }
+
+        debug!("No file found for YouTube ID: {}", youtube_id);
+        Ok(None)
     }
 
     // Get download location - matches Python get_download_location function exactly
@@ -23985,7 +23990,8 @@ impl DatabasePool {
                     "YouTubeVideos".thumbnailurl AS episodeartwork, "YouTubeVideos".videourl AS episodeurl,
                     "YouTubeVideos".duration AS episodeduration,
                     "YouTubeVideos".listenposition AS listenduration,
-                    "YouTubeVideos".youtubevideoid AS guid
+                    "YouTubeVideos".youtubevideoid AS guid,
+                    COALESCE("Podcasts".downloadyoutubevideos, FALSE) AS is_video
                     FROM "YouTubeVideos"
                     INNER JOIN "Podcasts" ON "YouTubeVideos".podcastid = "Podcasts".podcastid
                     WHERE "Podcasts".podcastid = $1 AND "Podcasts".userid = $2
@@ -24015,7 +24021,8 @@ impl DatabasePool {
                         "Episodeurl": row.try_get::<String, _>("episodeurl").unwrap_or_default(),
                         "Episodeduration": row.try_get::<i32, _>("episodeduration").unwrap_or(0),
                         "Listenduration": row.try_get::<i32, _>("listenduration").unwrap_or(0),
-                        "Guid": row.try_get::<String, _>("guid").unwrap_or_default()
+                        "Guid": row.try_get::<String, _>("guid").unwrap_or_default(),
+                        "is_video": row.try_get::<bool, _>("is_video").unwrap_or(false)
                     });
                     episodes.push(episode);
                 }
@@ -24030,7 +24037,8 @@ impl DatabasePool {
                     YouTubeVideos.ThumbnailURL AS EpisodeArtwork, YouTubeVideos.VideoURL AS EpisodeURL,
                     YouTubeVideos.Duration AS EpisodeDuration,
                     YouTubeVideos.ListenPosition AS ListenDuration,
-                    YouTubeVideos.YouTubeVideoID AS guid
+                    YouTubeVideos.YouTubeVideoID AS guid,
+                    COALESCE(Podcasts.DownloadYouTubeVideos, 0) AS is_video
                     FROM YouTubeVideos
                     INNER JOIN Podcasts ON YouTubeVideos.PodcastID = Podcasts.PodcastID
                     WHERE Podcasts.PodcastID = ? AND Podcasts.UserID = ?
@@ -24060,7 +24068,8 @@ impl DatabasePool {
                         "Episodeurl": row.try_get::<String, _>("EpisodeURL").unwrap_or_default(),
                         "Episodeduration": row.try_get::<i32, _>("EpisodeDuration").unwrap_or(0),
                         "Listenduration": row.try_get::<i32, _>("ListenDuration").unwrap_or(0),
-                        "Guid": row.try_get::<String, _>("guid").unwrap_or_default()
+                        "Guid": row.try_get::<String, _>("guid").unwrap_or_default(),
+                        "is_video": row.try_get::<i8, _>("is_video").map(|v| v != 0).unwrap_or(false)
                     });
                     episodes.push(episode);
                 }
@@ -24159,11 +24168,12 @@ impl DatabasePool {
             }
         };
 
-        // Delete the MP3 files for each video
+        // Delete the downloaded media files for each video
         for video_id in &video_ids {
             let file_paths = vec![
                 format!("/opt/pinepods/downloads/youtube/{}.mp3", video_id),
                 format!("/opt/pinepods/downloads/youtube/{}.mp3.mp3", video_id), // In case of double extension
+                format!("/opt/pinepods/downloads/youtube/{}.mp4", video_id), // Video download
             ];
 
             for file_path in file_paths {
@@ -24402,6 +24412,56 @@ impl DatabasePool {
                 // Update the feed cutoff days
                 let result = sqlx::query("UPDATE Podcasts SET FeedCutoffDays = ? WHERE PodcastID = ? AND UserID = ?")
                     .bind(feed_cutoff_days)
+                    .bind(podcast_id)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await?;
+
+                Ok(result.rows_affected() > 0)
+            }
+        }
+    }
+
+    // Whether a YouTube channel podcast should download full videos (MP4) instead of audio-only (MP3)
+    pub async fn get_youtube_video_download(&self, podcast_id: i32) -> AppResult<bool> {
+        match self {
+            DatabasePool::Postgres(pool) => {
+                let row = sqlx::query(r#"SELECT COALESCE(downloadyoutubevideos, FALSE) AS download_video FROM "Podcasts" WHERE podcastid = $1"#)
+                    .bind(podcast_id)
+                    .fetch_optional(pool)
+                    .await?;
+
+                Ok(row.map(|r| r.try_get("download_video").unwrap_or(false)).unwrap_or(false))
+            }
+            DatabasePool::MySQL(pool) => {
+                let row = sqlx::query("SELECT COALESCE(DownloadYouTubeVideos, 0) AS download_video FROM Podcasts WHERE PodcastID = ?")
+                    .bind(podcast_id)
+                    .fetch_optional(pool)
+                    .await?;
+
+                Ok(row
+                    .and_then(|r| r.try_get::<i8, _>("download_video").ok())
+                    .map(|v| v != 0)
+                    .unwrap_or(false))
+            }
+        }
+    }
+
+    pub async fn update_youtube_video_download(&self, podcast_id: i32, user_id: i32, download_video: bool) -> AppResult<bool> {
+        match self {
+            DatabasePool::Postgres(pool) => {
+                let result = sqlx::query(r#"UPDATE "Podcasts" SET downloadyoutubevideos = $1 WHERE podcastid = $2 AND userid = $3"#)
+                    .bind(download_video)
+                    .bind(podcast_id)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await?;
+
+                Ok(result.rows_affected() > 0)
+            }
+            DatabasePool::MySQL(pool) => {
+                let result = sqlx::query("UPDATE Podcasts SET DownloadYouTubeVideos = ? WHERE PodcastID = ? AND UserID = ?")
+                    .bind(download_video)
                     .bind(podcast_id)
                     .bind(user_id)
                     .execute(pool)

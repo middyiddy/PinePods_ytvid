@@ -50,6 +50,8 @@ pub struct YouTubeSubscribeQuery {
     pub channel_id: String,
     pub user_id: i32,
     pub feed_cutoff: Option<i32>,
+    // Download episodes as video (MP4) instead of audio-only (MP3)
+    pub download_video: Option<bool>,
 }
 
 // Query struct for check YouTube channel endpoint
@@ -267,6 +269,7 @@ pub async fn subscribe_to_youtube_channel(
         &channel_info,
         query.user_id,
         feed_cutoff,
+        query.download_video.unwrap_or(false),
     ).await?;
 
     // Spawn background task to process YouTube videos
@@ -340,6 +343,60 @@ pub fn get_mp3_duration(file_path: &str) -> Option<i32> {
             warn!("Failed to read MP3 metadata from {}: {}", file_path, e);
             None
         }
+    }
+}
+
+// Helper function to get media duration via ffprobe (works for MP4 video downloads,
+// where mp3_metadata can't help)
+pub async fn get_media_duration(file_path: &str) -> Option<i32> {
+    let output = Command::new("ffprobe")
+        .args(&[
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        warn!("ffprobe failed for {}: {}", file_path, String::from_utf8_lossy(&output.stderr));
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|d| d as i32)
+}
+
+// Helper to get the duration of a finished YouTube download, whichever container it uses
+pub async fn get_downloaded_duration(output_path: &str) -> Option<i32> {
+    if output_path.ends_with(".mp3") {
+        get_mp3_duration(output_path)
+    } else {
+        get_media_duration(output_path).await
+    }
+}
+
+// The extension and full output path a YouTube download uses for the given mode
+pub fn youtube_output_path(video_id: &str, download_video: bool) -> String {
+    if download_video {
+        format!("/opt/pinepods/downloads/youtube/{}.mp4", video_id)
+    } else {
+        format!("/opt/pinepods/downloads/youtube/{}.mp3", video_id)
+    }
+}
+
+// Download a YouTube video keeping the video track (as MP4) or extracting audio (as MP3),
+// depending on the channel's DownloadYouTubeVideos setting
+pub async fn download_youtube_media(video_id: &str, output_path: &str, download_video: bool) -> Result<(), AppError> {
+    if download_video {
+        download_youtube_video(video_id, output_path).await
+    } else {
+        download_youtube_audio(video_id, output_path).await
     }
 }
 
@@ -537,16 +594,18 @@ pub async fn process_youtube_channel(
             info!("No new videos to add");
         }
 
-        // Download audio for recent videos
-        info!("Starting audio downloads");
+        // Download media for recent videos (audio-only MP3, or full video MP4 when the
+        // channel has DownloadYouTubeVideos enabled)
+        let download_video = state.db_pool.get_youtube_video_download(podcast_id).await.unwrap_or(false);
+        info!("Starting {} downloads", if download_video { "video" } else { "audio" });
         let mut successful_downloads = 0;
         let mut failed_downloads = 0;
 
         for video in &recent_videos {
             let video_id = video.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let title = video.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            
-            let output_path = format!("/opt/pinepods/downloads/youtube/{}.mp3", video_id);
+
+            let output_path = youtube_output_path(video_id, download_video);
             let output_path_double = format!("{}.mp3", output_path);
 
             debug!("Processing download for video: {}", video_id);
@@ -554,27 +613,27 @@ pub async fn process_youtube_channel(
             info!("Target path: {}", output_path);
 
             // Check if file already exists
-            if tokio::fs::metadata(&output_path).await.is_ok() || 
-               tokio::fs::metadata(&output_path_double).await.is_ok() {
-                debug!("Audio file already exists, skipping download");
+            if tokio::fs::metadata(&output_path).await.is_ok() ||
+               (!download_video && tokio::fs::metadata(&output_path_double).await.is_ok()) {
+                debug!("Media file already exists, skipping download");
                 continue;
             }
 
             info!("Starting download...");
-            match download_youtube_audio(video_id, &output_path).await {
+            match download_youtube_media(video_id, &output_path, download_video).await {
                 Ok(_) => {
                     info!("Download completed successfully");
                     successful_downloads += 1;
-                    
-                    // Get duration from the downloaded MP3 file and update database
-                    if let Some(duration) = get_mp3_duration(&output_path) {
+
+                    // Get duration from the downloaded file and update database
+                    if let Some(duration) = get_downloaded_duration(&output_path).await {
                         if let Err(e) = state.db_pool.update_youtube_video_duration(video_id, duration).await {
                             warn!("Failed to update duration for video {}: {}", video_id, e);
                         } else {
                             debug!("Updated duration for video {} to {} seconds", video_id, duration);
                         }
                     } else {
-                        warn!("Could not read duration from MP3 file: {}", output_path);
+                        warn!("Could not read duration from downloaded file: {}", output_path);
                     }
                 }
                 Err(e) => {
@@ -638,6 +697,50 @@ pub async fn download_youtube_audio(video_id: &str, output_path: &str) -> Result
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppError::external_error(&format!("yt-dlp download failed: {}", stderr)));
+    }
+
+    Ok(())
+}
+
+// Download YouTube video (video + audio, MP4) using yt-dlp binary
+pub async fn download_youtube_video(video_id: &str, output_path: &str) -> Result<(), AppError> {
+    // Remove .mp4 extension if present; yt-dlp fills in %(ext)s
+    let base_path = if output_path.ends_with(".mp4") {
+        &output_path[..output_path.len() - 4]
+    } else {
+        output_path
+    };
+
+    let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let output_template = format!("{}.%(ext)s", base_path);
+
+    // Prefer H.264/AAC in an MP4 container so browsers (including Safari) can play the file;
+    // fall back to any best format remuxed/merged into MP4.
+    let output = Command::new("yt-dlp")
+        .args(&[
+            "--format", "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
+            "--merge-output-format", "mp4",
+            "--remux-video", "mp4",
+            "--output", &output_template,
+            "--ignore-errors",
+            "--socket-timeout", "30",
+            &video_url
+        ])
+        .output()
+        .await
+        .map_err(|e| AppError::external_error(&format!("Failed to execute yt-dlp: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::external_error(&format!("yt-dlp video download failed: {}", stderr)));
+    }
+
+    // yt-dlp should have produced base_path.mp4; verify so callers can trust the path
+    let expected = format!("{}.mp4", base_path);
+    if tokio::fs::metadata(&expected).await.is_err() {
+        return Err(AppError::external_error(&format!(
+            "yt-dlp finished but no MP4 was produced at {}", expected
+        )));
     }
 
     Ok(())
